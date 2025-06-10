@@ -1,0 +1,4 @@
+listen: "80"
+server_name: "blog.phrimp.io.vn"
+root: "/var/www/blog"
+index: "index.html"

@@ -1,0 +1,5 @@
+{
+  "listen": "80",
+  "server_name": "evolvia.phrimp.io.vn",
+  "proxy_port": "8084"
+}

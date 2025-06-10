@@ -1,0 +1,6 @@
+{
+  "listen": "80",
+  "server_name": "portfolio.phrimp.io.vn",
+  "root": "/usr/share/nginx/html",
+  "index": "portfolio.html"
+}
