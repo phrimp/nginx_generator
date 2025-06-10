@@ -14,6 +14,10 @@ import (
 )
 
 func main() {
+	if os.Geteuid() != 0 {
+		fmt.Println("Please run this tool as root.")
+		return
+	}
 	var (
 		configPath  = flag.String("config", "", "Path to server configuration JSON/YAML file")
 		nginxPath   = flag.String("nginx", "", "Path to existing nginx.conf file (auto-detected if not specified)")
