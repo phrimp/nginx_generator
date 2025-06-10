@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -19,7 +20,13 @@ type ServerConfig struct {
 }
 
 func Load(filepath string) (*ServerConfig, error) {
-	data, err := os.ReadFile(filepath)
+	file, err := os.Open(filepath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read config file: %w", err)
+	}
+	defer file.Close()
+
+	data, err := io.ReadAll(file)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read config file: %w", err)
 	}

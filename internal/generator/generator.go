@@ -2,6 +2,7 @@ package generator
 
 import (
 	"fmt"
+	"io"
 	"nginx_tool/internal/config"
 	"os"
 	"regexp"
@@ -24,7 +25,13 @@ func (g *Generator) AddServerToNginx(cfg *config.ServerConfig, nginxPath, server
 		fmt.Printf("📋 Backup created: %s\n", backupPath)
 	}
 
-	nginxContent, err := os.ReadFile(nginxPath)
+	file, err := os.Open(nginxPath)
+	if err != nil {
+		return fmt.Errorf("failed to read nginx config: %w", err)
+	}
+
+	nginxContent, err := io.ReadAll(file)
+	file.Close()
 	if err != nil {
 		return fmt.Errorf("failed to read nginx config: %w", err)
 	}
@@ -90,10 +97,14 @@ func (g *Generator) GenerateProxyServerBlock(cfg *config.ServerConfig) string {
     }`, cfg.Listen, cfg.ServerName, proxyTarget, proxyTarget)
 }
 
-// GeneratePreview creates a preview of how the nginx config will look after modification
 func (g *Generator) GeneratePreview(nginxPath, serverBlock string) (string, error) {
-	// Read existing nginx configuration
-	nginxContent, err := os.ReadFile(nginxPath)
+	file, err := os.Open(nginxPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to read nginx config: %w", err)
+	}
+	defer file.Close()
+
+	nginxContent, err := io.ReadAll(file)
 	if err != nil {
 		return "", fmt.Errorf("failed to read nginx config: %w", err)
 	}
@@ -164,7 +175,6 @@ func (g *Generator) GeneratePreview(nginxPath, serverBlock string) (string, erro
 }
 
 func (g *Generator) addServerBlock(nginxContent, serverBlock string) (string, error) {
-	// Find the http section
 	httpRegex := regexp.MustCompile(`(?s)(http\s*\{)(.*?)(\})`)
 	matches := httpRegex.FindStringSubmatch(nginxContent)
 
@@ -177,7 +187,6 @@ func (g *Generator) addServerBlock(nginxContent, serverBlock string) (string, er
 	httpEnd := matches[3]
 
 	httpContent = strings.TrimRight(httpContent, " \t\n")
-
 	newHttpContent := httpContent + "\n\n" + serverBlock + "\n"
 
 	result := httpRegex.ReplaceAllString(nginxContent, httpStart+newHttpContent+httpEnd)
@@ -185,11 +194,19 @@ func (g *Generator) addServerBlock(nginxContent, serverBlock string) (string, er
 	return result, nil
 }
 
-// copyFile creates a backup copy of a file
 func (g *Generator) copyFile(src, dst string) error {
-	data, err := os.ReadFile(src)
+	srcFile, err := os.Open(src)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(dst, data, 0644)
+	defer srcFile.Close()
+
+	dstFile, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer dstFile.Close()
+
+	_, err = io.Copy(dstFile, srcFile)
+	return err
 }

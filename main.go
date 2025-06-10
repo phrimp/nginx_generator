@@ -4,21 +4,24 @@ import (
 	"bufio"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"nginx_tool/internal/config"
 	"nginx_tool/internal/generator"
 	"os"
+	"os/exec"
 	"strings"
 )
 
 func main() {
 	var (
 		configPath  = flag.String("config", "", "Path to server configuration JSON/YAML file")
-		nginxPath   = flag.String("nginx", "", "Path to existing nginx.conf file")
+		nginxPath   = flag.String("nginx", "", "Path to existing nginx.conf file (auto-detected if not specified)")
 		serverType  = flag.String("type", "static", "Server type: 'static' or 'proxy'")
 		interactive = flag.Bool("interactive", false, "Manual input mode via terminal")
 		preview     = flag.Bool("preview", true, "Show preview before applying changes")
 		backup      = flag.Bool("backup", true, "Create backup of nginx.conf before modification")
+		autoDetect  = flag.Bool("auto-detect", true, "Auto-detect nginx configuration file")
 		help        = flag.Bool("help", false, "Show help message")
 	)
 	flag.Parse()
@@ -28,14 +31,21 @@ func main() {
 		return
 	}
 
-	if *nginxPath == "" {
-		log.Fatal("Error: nginx path is required")
+	if *nginxPath == "" && *autoDetect {
+		detectedPath, err := detectNginxConfig()
+		if err != nil {
+			log.Printf("Warning: Could not auto-detect nginx config: %v", err)
+			log.Fatal("Error: nginx path is required. Use -nginx flag to specify manually.")
+		}
+		*nginxPath = detectedPath
+		fmt.Printf("🔍 Auto-detected nginx config: %s\n", *nginxPath)
+	} else if *nginxPath == "" {
+		log.Fatal("Error: nginx path is required when auto-detection is disabled")
 	}
 
 	var cfg *config.ServerConfig
 	var err error
 
-	// Get configuration either from file or interactive input
 	if *interactive {
 		cfg, err = getInteractiveConfig(*serverType)
 		if err != nil {
@@ -51,15 +61,12 @@ func main() {
 		}
 	}
 
-	// Validate server type
 	if *serverType != "static" && *serverType != "proxy" {
 		log.Fatal("Error: type must be either 'static' or 'proxy'")
 	}
 
-	// Create generator
 	gen := generator.New()
 
-	// Show preview if requested
 	if *preview {
 		shouldProceed, err := showPreview(gen, cfg, *nginxPath, *serverType)
 		if err != nil {
@@ -71,7 +78,6 @@ func main() {
 		}
 	}
 
-	// Add server block to nginx
 	if err := gen.AddServerToNginx(cfg, *nginxPath, *serverType, *backup); err != nil {
 		log.Fatalf("Error adding server to nginx config: %v", err)
 	}
@@ -81,6 +87,147 @@ func main() {
 	fmt.Printf("🌐 Server name: %s\n", cfg.ServerName)
 }
 
+func detectNginxConfig() (string, error) {
+	fmt.Println("🔍 Auto-detecting nginx configuration...")
+
+	commonPaths := []string{
+		"/etc/nginx/nginx.conf",
+		"/usr/local/etc/nginx/nginx.conf",
+		"/usr/local/nginx/conf/nginx.conf",
+		"/opt/nginx/conf/nginx.conf",
+		"/etc/nginx.conf",
+	}
+
+	for _, path := range commonPaths {
+		if _, err := os.Stat(path); err == nil {
+			if isValidNginxConfig(path) {
+				return path, nil
+			}
+		}
+	}
+
+	if nginxBinary, err := findNginxBinary(); err == nil {
+		if configPath, err := getNginxConfigFromBinary(nginxBinary); err == nil {
+			return configPath, nil
+		}
+	}
+
+	if configPath, err := getNginxConfigFromProcess(); err == nil {
+		return configPath, nil
+	}
+
+	return "", fmt.Errorf("no nginx configuration file found")
+}
+
+func findNginxBinary() (string, error) {
+	commonBinPaths := []string{
+		"/usr/sbin/nginx",
+		"/usr/bin/nginx",
+		"/usr/local/sbin/nginx",
+		"/usr/local/bin/nginx",
+		"/opt/nginx/sbin/nginx",
+		"/sbin/nginx",
+		"/bin/nginx",
+	}
+
+	for _, path := range commonBinPaths {
+		if _, err := os.Stat(path); err == nil {
+			return path, nil
+		}
+	}
+
+	if path, err := exec.LookPath("nginx"); err == nil {
+		return path, nil
+	}
+
+	return "", fmt.Errorf("nginx binary not found")
+}
+
+func getNginxConfigFromBinary(nginxBinary string) (string, error) {
+	cmd := exec.Command(nginxBinary, "-t")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		cmd = exec.Command(nginxBinary, "-T")
+		output, err = cmd.CombinedOutput()
+		if err != nil {
+			return "", fmt.Errorf("failed to get config from nginx binary: %v", err)
+		}
+	}
+
+	outputStr := string(output)
+	lines := strings.Split(outputStr, "\n")
+
+	for _, line := range lines {
+		if strings.Contains(line, "configuration file") && strings.Contains(line, "nginx.conf") {
+			parts := strings.Fields(line)
+			for _, part := range parts {
+				if strings.HasSuffix(part, "nginx.conf") {
+					if _, err := os.Stat(part); err == nil {
+						return part, nil
+					}
+				}
+			}
+		}
+	}
+
+	return "", fmt.Errorf("could not extract config path from nginx binary output")
+}
+
+func getNginxConfigFromProcess() (string, error) {
+	cmd := exec.Command("ps", "aux")
+	output, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("failed to run ps command: %v", err)
+	}
+
+	lines := strings.Split(string(output), "\n")
+	for _, line := range lines {
+		if strings.Contains(line, "nginx: master process") {
+			fields := strings.Fields(line)
+			for i, field := range fields {
+				if field == "-c" && i+1 < len(fields) {
+					configPath := fields[i+1]
+					if _, err := os.Stat(configPath); err == nil {
+						return configPath, nil
+					}
+				}
+				if strings.HasSuffix(field, "nginx.conf") {
+					if _, err := os.Stat(field); err == nil {
+						return field, nil
+					}
+				}
+			}
+		}
+	}
+
+	return "", fmt.Errorf("could not find nginx config from running process")
+}
+
+func isValidNginxConfig(path string) bool {
+	file, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer file.Close()
+
+	data, err := io.ReadAll(file)
+	if err != nil {
+		return false
+	}
+
+	content := string(data)
+	nginxKeywords := []string{"http", "server", "location", "events"}
+
+	keywordCount := 0
+	for _, keyword := range nginxKeywords {
+		if strings.Contains(content, keyword) {
+			keywordCount++
+		}
+	}
+
+	return keywordCount >= 2
+}
+
 func getInteractiveConfig(serverType string) (*config.ServerConfig, error) {
 	reader := bufio.NewReader(os.Stdin)
 	cfg := &config.ServerConfig{}
@@ -88,7 +235,6 @@ func getInteractiveConfig(serverType string) (*config.ServerConfig, error) {
 	fmt.Println("🔧 Interactive Configuration Mode")
 	fmt.Println("=" + strings.Repeat("=", 40))
 
-	// Get server name
 	fmt.Print("Enter server name (e.g., example.com): ")
 	serverName, err := reader.ReadString('\n')
 	if err != nil {
@@ -96,7 +242,6 @@ func getInteractiveConfig(serverType string) (*config.ServerConfig, error) {
 	}
 	cfg.ServerName = strings.TrimSpace(serverName)
 
-	// Get listen port
 	fmt.Print("Enter listen port [80]: ")
 	listen, err := reader.ReadString('\n')
 	if err != nil {
@@ -108,7 +253,6 @@ func getInteractiveConfig(serverType string) (*config.ServerConfig, error) {
 	}
 	cfg.Listen = listen
 
-	// Get type-specific configuration
 	switch serverType {
 	case "static":
 		fmt.Print("Enter document root (e.g., /var/www/html): ")
@@ -137,7 +281,6 @@ func getInteractiveConfig(serverType string) (*config.ServerConfig, error) {
 		}
 		proxy = strings.TrimSpace(proxy)
 
-		// Check if it's just a port number or full URL
 		if strings.HasPrefix(proxy, "http://") || strings.HasPrefix(proxy, "https://") {
 			cfg.ProxyPass = proxy
 		} else {
@@ -155,7 +298,6 @@ func showPreview(gen *generator.Generator, cfg *config.ServerConfig, nginxPath, 
 	fmt.Println("📋 Configuration Preview")
 	fmt.Println("=" + strings.Repeat("=", 50))
 
-	// Show current configuration
 	fmt.Printf("Server Name: %s\n", cfg.ServerName)
 	fmt.Printf("Listen Port: %s\n", cfg.Listen)
 	fmt.Printf("Server Type: %s\n", serverType)
@@ -173,7 +315,6 @@ func showPreview(gen *generator.Generator, cfg *config.ServerConfig, nginxPath, 
 
 	fmt.Println()
 
-	// Generate and show the server block that will be added
 	var serverBlock string
 	switch serverType {
 	case "static":
@@ -182,7 +323,6 @@ func showPreview(gen *generator.Generator, cfg *config.ServerConfig, nginxPath, 
 		serverBlock = gen.GenerateProxyServerBlock(cfg)
 	}
 
-	// Show preview with context
 	preview, err := gen.GeneratePreview(nginxPath, serverBlock)
 	if err != nil {
 		return false, fmt.Errorf("failed to generate preview: %w", err)
@@ -193,7 +333,6 @@ func showPreview(gen *generator.Generator, cfg *config.ServerConfig, nginxPath, 
 	fmt.Println(preview)
 	fmt.Println("=" + strings.Repeat("=", 50))
 
-	// Ask for confirmation
 	fmt.Print("Do you want to proceed with these changes? (y/N): ")
 	response, err := reader.ReadString('\n')
 	if err != nil {
@@ -209,6 +348,9 @@ func showUsage() {
 	fmt.Println("Add new server blocks to existing nginx configuration")
 	fmt.Println()
 	fmt.Println("Usage:")
+	fmt.Println("  # Auto-detect nginx config (Linux)")
+	fmt.Println("  nginx-server-manager -interactive -type <server_type>")
+	fmt.Println()
 	fmt.Println("  # File-based configuration")
 	fmt.Println("  nginx-server-manager -config <config_file> -nginx <nginx_conf> -type <server_type>")
 	fmt.Println()
@@ -217,22 +359,36 @@ func showUsage() {
 	fmt.Println()
 	fmt.Println("Options:")
 	fmt.Println("  -config        Path to server configuration file (.json/.yaml)")
-	fmt.Println("  -nginx         Path to existing nginx.conf file")
+	fmt.Println("  -nginx         Path to existing nginx.conf file (auto-detected if not specified)")
 	fmt.Println("  -type          Server type:")
 	fmt.Println("                   static - Static file server")
 	fmt.Println("                   proxy  - Reverse proxy server")
 	fmt.Println("  -interactive   Manual input mode via terminal")
+	fmt.Println("  -auto-detect   Auto-detect nginx configuration file (default: true)")
 	fmt.Println("  -preview       Show preview before applying changes (default: true)")
 	fmt.Println("  -backup        Create backup before modifying (default: true)")
 	fmt.Println("  -help          Show this help message")
 	fmt.Println()
+	fmt.Println("Auto-Detection (Linux):")
+	fmt.Println("  The tool automatically searches for nginx.conf in common locations:")
+	fmt.Println("    • /etc/nginx/nginx.conf")
+	fmt.Println("    • /usr/local/etc/nginx/nginx.conf")
+	fmt.Println("    • /usr/local/nginx/conf/nginx.conf")
+	fmt.Println("    • /opt/nginx/conf/nginx.conf")
+	fmt.Println("  Also attempts to:")
+	fmt.Println("    • Find nginx binary and extract config path")
+	fmt.Println("    • Detect config from running nginx process")
+	fmt.Println()
 	fmt.Println("Examples:")
-	fmt.Println("  # File-based static server")
-	fmt.Println("  nginx-server-manager -config static.json -nginx /etc/nginx/nginx.conf -type static")
+	fmt.Println("  # Auto-detect and interactive mode")
+	fmt.Println("  nginx-server-manager -interactive -type static")
 	fmt.Println()
-	fmt.Println("  # Interactive proxy server")
-	fmt.Println("  nginx-server-manager -interactive -nginx /etc/nginx/nginx.conf -type proxy")
+	fmt.Println("  # Auto-detect with config file")
+	fmt.Println("  nginx-server-manager -config static.json -type static")
 	fmt.Println()
-	fmt.Println("  # Skip preview")
-	fmt.Println("  nginx-server-manager -interactive -nginx nginx.conf -type static -preview=false")
+	fmt.Println("  # Manual nginx path")
+	fmt.Println("  nginx-server-manager -interactive -nginx /custom/path/nginx.conf -type proxy")
+	fmt.Println()
+	fmt.Println("  # Disable auto-detection")
+	fmt.Println("  nginx-server-manager -config config.json -nginx nginx.conf -type static -auto-detect=false")
 }
